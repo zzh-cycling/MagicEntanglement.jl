@@ -1,15 +1,15 @@
 name = "MagicEntanglement"
 uuid = "f5107b01-e3f5-45d5-bb79-a651481815bd"
-version = "1.0.0-DEV"
 authors = ["Zhaohui Zhi"]
+version = "1.0.0-DEV"
 
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 QuantumClifford = "0525e862-1e90-11e9-3e4d-1b39d7109de1"
 
 [compat]
-LinearAlgebra = "1.12.0"
-QuantumClifford = "0.11.0"
+LinearAlgebra = "1.11.0"
+QuantumClifford = "0.10.1"
 julia = "1"
 
 [extras]
