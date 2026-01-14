@@ -1,0 +1,6 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+MagicEntanglement = "f5107b01-e3f5-45d5-bb79-a651481815bd"
+
+[sources]
+MagicEntanglement = {path = ".."}
