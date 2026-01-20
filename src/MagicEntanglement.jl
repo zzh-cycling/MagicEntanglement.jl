@@ -1,5 +1,7 @@
 module MagicEntanglement
 
-# Write your package code here.
+include("Logical.jl")
+
+export all_logical_paulis, compute_logical_entropy
 
 end

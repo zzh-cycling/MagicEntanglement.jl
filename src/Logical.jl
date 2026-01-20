@@ -87,9 +87,11 @@ function compute_logical_entropy(S::Stabilizer, A::Vector{Int}, Ψ::Vector{ET}) 
     return S
 end
 
-# ---------- 辅助：生成所有 logical Pauli ----------
+# ---------- Generate all logical operators with type PauliOperator ----------
 function all_logical_paulis(tab::MixedDestabilizer)
-    k = rank(tab)
+    r = rank(tab)
+    n = nqubits(tab)
+    k = n -r # logical qubits number
     ops = PauliOperator[]
     for idx in 0:(4^k-1)
         # 把 idx 看成 k 位 4 进制：0=I,1=X,2=Y,3=Z
