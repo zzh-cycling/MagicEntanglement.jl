@@ -6,7 +6,7 @@ function compute_logical_entropy(S::Stabilizer, subsystems::Vector{Int}, ψ::Vec
    
     sub_logical_ops = [op for op in logical_ops if all(q in subsystems for q in qubits(op))]
     
-    # 计算熵
+    # Calculate entropy
     entropy = 0.0
     for op in sub_logical_ops
         p = abs2(dot(ψ, apply(op, ψ)))
@@ -19,66 +19,63 @@ function compute_logical_entropy(S::Stabilizer, subsystems::Vector{Int}, ψ::Vec
     
 end
 
-using QuantumClifford
-using LinearAlgebra: dot, eigen!, log2
-
 """
     compute_logical_entropy(S::Stabilizer, A::Vector{Int}, Ψ::Vector{ET}) where ET<:Number
 
-论文 Algorithm 1 的完整实现。
-输入
-  S   : 公共 stabilizer 群（n 个物理比特）
-  A   : 子系统比特编号，例如 [1,2,3]
-  Ψ   : 低魔法态 |Ψ⟩=Σ cⱼ|ψⱼ⟩ 的系数向量，长度须等于 |ψⱼ⟩ 的个数 K
-输出
-  S(ρ_a) : 逻辑子系统 a 的 von Neumann 熵
+Full implementation of Algorithm 1 in the paper.
+Input
+    S   : Common stabilizer group (n physical qubits)
+    A   : Subsystem qubit indices, e.g. [1,2,3]
+    Ψ   : Coefficient vector of the low-magic state |Ψ⟩=Σ cⱼ|ψⱼ⟩, length must equal the number K of |ψⱼ⟩
+Output
+    S(ρ_a) : von Neumann entropy of logical subsystem a
 """
 function compute_logical_entropy(S::Stabilizer, A::Vector{Int}, Ψ::Vector{ET}) where ET<:Number
-    n = nqubits(S)               # 物理比特数
-    @assert all(1 .≤ A .≤ n) "subsystem A 越界"
-    K = length(Ψ)                # 叠加项数
+    n = nqubits(S)               # Number of physical qubits
+    @assert all(1 .≤ A .≤ n) "subsystem A out of bounds"
+    K = length(Ψ)                # Number of superposition terms
     @assert K ≥ 1
 
-    # ---------- 1. 取得完整 logical Pauli 基 ----------
-    tab = MixedDestabilizer(S)   # 同时给出 stabilizer + logical
-    k = rank(tab)                # 逻辑比特数 k = ν
-    # 所有 4^k 个 logical Pauli 算符（含 I）
-    logical_basis = all_logical_paulis(tab)   # 向量长度 4^k
+    # ---------- 1. Obtain the complete logical Pauli basis ----------
+    tab = MixedDestabilizer(S)   # Provides both stabilizer + logical
+    k = rank(tab)                # Number of logical qubits k = ν
+    # All 4^k logical Pauli operators (including I)
+    logical_basis = all_logical_paulis(tab)   # Vector length 4^k
 
-    # ---------- 2. cleaning：只保留完全落在 A 上的 ----------
-    sub_logical = PauliOperator[]              # 将构成 M_A 的基
+    # ---------- 2. Cleaning: keep only those fully supported on A ----------
+    sub_logical = PauliOperator[]              # Will form the basis of M_A
     for P in logical_basis
-        # 检查 P 的 support 是否 ⊆ A
+        # Check if the support of P is ⊆ A
         support = [i for i in 1:n if !iszero(P,i)]
         if all(q -> q ∈ A, support)
             push!(sub_logical, P)
         end
     end
-    d = length(sub_logical)        # M_A 的维度（含 I），必为 2^{k_a}
-    k_a = round(Int, log2(d))      # A 能恢复的逻辑比特数
+    d = length(sub_logical)        # Dimension of M_A (including I), must be 2^{k_a}
+    k_a = round(Int, log2(d))      # Number of logical qubits recoverable from A
     @assert 2^k_a == d "internal dim error"
 
-    # ---------- 3. 对 M_A 做 tomography，重建 ρ_a ----------
+    # ---------- 3. Tomography on M_A to reconstruct ρ_a ----------
     ρ_a = zeros(ComplexF64, d, d)  # 2^{k_a} × 2^{k_a}
-    # 把 M_A 的基映射到 2^{k_a} 维 Hilbert 空间的 Pauli 矩阵
-    # 用标准编码：第 i 个 Pauli 对应 2^{k_a}×2^{k_a} 的矩阵表示
+    # Map the basis of M_A to Pauli matrices in 2^{k_a}-dim Hilbert space
+    # Standard encoding: the i-th Pauli corresponds to a 2^{k_a}×2^{k_a} matrix
     pauli_mat = Matrix{ComplexF64}[logical_matrix(p) for p in sub_logical]
-    # 归一化系数：Tr(P_i P_j)=d δ_{ij}
+    # Normalization: Tr(P_i P_j)=d δ_{ij}
     for (i, Pi) in enumerate(sub_logical)
-        # 计算 <Ψ|Pi|Ψ>
+        # Compute <Ψ|Pi|Ψ>
         expval = zero(ComplexF64)
         for α in 1:K, β in 1:K
-            # |ψ_α⟩ 是 stabilizer state，可用 stabilizer 内积公式
+            # |ψ_α⟩ is a stabilizer state, can use stabilizer inner product formula
             ov = dot(stab_state(S,α), apply(Pi, stab_state(S,β)))
             expval += conj(Ψ[α]) * Ψ[β] * ov
         end
         ρ_a .+= (expval / d) .* pauli_mat[i]
     end
-    # 保证 Hermitian & trace=1
+    # Ensure Hermitian & trace=1
     ρ_a = (ρ_a + ρ_a') / 2
     ρ_a /= tr(ρ_a)
 
-    # ---------- 4. 对角化得熵 ----------
+    # ---------- 4. Diagonalize to get entropy ----------
     λ = eigen!(Hermitian(ρ_a)).values
     S = 0.0
     for v in λ
@@ -88,22 +85,34 @@ function compute_logical_entropy(S::Stabilizer, A::Vector{Int}, Ψ::Vector{ET}) 
 end
 
 # ---------- Generate all logical operators with type PauliOperator ----------
-function all_logical_paulis(tab::MixedDestabilizer)
-    r = rank(tab)
-    n = nqubits(tab)
-    k = n -r # logical qubits number
-    ops = PauliOperator[]
+function all_logical_paulis(stab::MixedDestabilizer)
+    r = rank(stab)
+    n = nqubits(stab)
+    k = n -r # number of logical qubits
+    LX_tab = logicalxview(stab).tab
+    LZ_tab = logicalzview(stab).tab
+    stab_tab = tab(stab)
+
+    ops = PauliOperator[LX_tab..., LZ_tab...]
+    for i in 1:k
+        for j in 1:r
+            push!(ops, LX_tab[i]*stab_tab[j])
+            push!(ops, LZ_tab[i]*stab_tab[j])
+        end
+    end
+    for s in stab_tab
+    end
     for idx in 0:(4^k-1)
-        # 把 idx 看成 k 位 4 进制：0=I,1=X,2=Y,3=Z
-        P = one(PauliOperator, nqubits(tab))
+        # Treat idx as k-digit base-4: 0=I,1=X,2=Y,3=Z
+        P = one(PauliOperator, nqubits(stab))
         for i in 1:k
             digit = (idx >> (2(i-1))) & 3
             if digit == 1
-                P *= logicalxview(tab)[i]
+                P *= LX_tab[i]
             elseif digit == 3
-                P *= logicalzview(tab)[i]
+                P *= LZ_tab[i]
             elseif digit == 2
-                P *= im * logicalxview(tab)[i] * logicalzview(tab)[i]
+                P *= im * LX_tab[i] * LZ_tab[i]
             end
         end
         push!(ops, P)
@@ -111,17 +120,16 @@ function all_logical_paulis(tab::MixedDestabilizer)
     ops
 end
 
-# ---------- 辅助：stabilizer state 的快速内积 ----------
+# ---------- Helper: fast inner product for stabilizer state ----------
 function stab_state(S::Stabilizer, idx::Int)
-    # 这里假设 |ψ_idx⟩ 是 code 子空间里某个
-    # 固定 logical 计算基态（例如 |+⟩ 或 |0⟩）。
-    # 为演示，我们直接取第 idx 个 stabilizer state 的 tableau 表示。
-    # 实际使用时，可把 |ψ_j⟩ 预先存成 Stabilizer 对象。
+    # Here we assume |ψ_idx⟩ is a certain logical computational basis state in the code subspace (e.g., |+⟩ or |0⟩).
+    # For demonstration, we directly take the tableau representation of the idx-th stabilizer state.
+    # In practice, |ψ_j⟩ can be pre-stored as Stabilizer objects.
     tab = copy(S)
-    # 简单方案：把 logical Z 设为 +1 本征态
+    # Simple approach: set logical Z to +1 eigenstate
     logicalz = logicalzview(tab)
     for i in 1:length(logicalz)
-        apply!(tab, logicalz[i])   # 测量并投影
+        apply!(tab, logicalz[i])   # Measure and project
     end
     tab
 end
