@@ -13,5 +13,4 @@ export all_logical_paulis,
        compute_logical_density_matrix,
        find_minimal_support_representative,
        is_in_stabilizer_group
-
 end
