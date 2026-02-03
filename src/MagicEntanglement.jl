@@ -10,6 +10,8 @@ export all_logical_paulis,
        pauli_to_matrix,
        stabilizer_state_vector,
        expect_pauli,
-       compute_logical_density_matrix
+       compute_logical_density_matrix,
+       find_minimal_support_representative,
+       is_in_stabilizer_group
 
 end

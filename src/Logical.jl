@@ -1,6 +1,7 @@
 using QuantumClifford
 using QuantumClifford: logicalxview, logicalzview, MixedDestabilizer, Stabilizer, 
-                       PauliOperator, nqubits, rank, tab, stab_to_gf2, comm
+                       PauliOperator, nqubits, rank, tab, stab_to_gf2, comm,
+                       stabilizerview, destabilizerview
 using LinearAlgebra
 using LinearAlgebra: I
 
@@ -55,6 +56,14 @@ Given a stabilizer code with k logical qubits, there are 4^k logical Pauli opera
 corresponding to all combinations of I, X, Y, Z on each logical qubit. These operators
 form a basis for the logical operator algebra M.
 
+**Important**: Logical operators are defined as equivalence classes modulo the stabilizer
+group. That is, if L is a logical operator and S is any stabilizer, then L*S is an 
+equivalent logical operator. This function returns one representative from each 
+equivalence class (the "bare" logical operators from logicalxview and logicalzview).
+
+For finding logical operators supported on a subregion, use `subregion_logical_paulis`
+which searches for representatives in each equivalence class that have the desired support.
+
 The encoding is:
 - 0 → I (identity)
 - 1 → X (logical X)  
@@ -65,11 +74,13 @@ The encoding is:
 - `stab::MixedDestabilizer`: A MixedDestabilizer representing the stabilizer code
 
 # Returns
-- `Vector{PauliOperator}`: All 4^k logical Pauli operators (including identity)
+- `Vector{PauliOperator}`: All 4^k logical Pauli operators (one representative per class)
 
 # Example
 ```julia
-julia> s = S"XXXX+ZIZI+IZIZ"  # [[4,1,2]] code
+julia> s = S"XXXX
+             ZIZI
+             IZIZ"  # [[4,1,2]] code
 julia> stab = MixedDestabilizer(s)
 julia> ops = all_logical_paulis(stab)
 julia> length(ops)  # 4^1 = 4
@@ -115,31 +126,180 @@ function all_logical_paulis(stab::MixedDestabilizer)
 end
 
 """
+    find_minimal_support_representative(L::PauliOperator, stab::MixedDestabilizer, A::Vector{Int}) -> Union{PauliOperator, Nothing}
+
+Find a representative of the logical operator L (modulo stabilizers) that is 
+supported only on subsystem A, if one exists.
+
+This uses Gaussian elimination on the stabilizer group restricted to the complement 
+of A to "clean" the logical operator.
+
+# Algorithm
+1. Let Ā = complement of A (qubits outside A)
+2. For each stabilizer generator S_i, check if multiplying L by S_i reduces support on Ā
+3. Use Gaussian elimination to systematically remove support on Ā
+
+# Returns
+- `PauliOperator`: A representative supported on A, or
+- `nothing`: If no such representative exists
+
+"""
+function find_minimal_support_representative(L::PauliOperator, stab::MixedDestabilizer, A::Vector{Int})
+    n = nqubits(L)
+    Abar = setdiff(1:n, A)  # Complement of A
+    
+    if isempty(Abar)
+        # A is the full system, L is trivially supported on A
+        return copy(L)
+    end
+    
+    S = stabilizerview(stab)
+    r = length(S)
+    
+    if r == 0
+        # No stabilizers to multiply
+        return is_supported_on(L, A) ? copy(L) : nothing
+    end
+    
+    # We want to solve: find subset T ⊆ {1,...,r} such that 
+    # L * ∏_{i∈T} S_i is supported on A
+    # 
+    # This is a system of linear equations over GF(2):
+    # For each qubit j ∈ Ā, we need the X and Z bits to be 0
+    # 
+    # Let's build the matrix: columns are stabilizers, rows are (X_j, Z_j) for j ∈ Ā
+    # Right-hand side is the corresponding bits of L
+    
+    num_constraints = 2 * length(Abar)
+    
+    # Build augmented matrix [M | b] over GF(2)
+    M = zeros(Bool, num_constraints, r + 1)  # Last column is RHS
+    
+    for (row_idx, j) in enumerate(Abar)
+        # X bit constraint for qubit j
+        x_row = 2 * row_idx - 1
+        # Z bit constraint for qubit j
+        z_row = 2 * row_idx
+        
+        # Fill in stabilizer contributions
+        for i in 1:r
+            x_stab, z_stab = S[i][j]
+            M[x_row, i] = x_stab
+            M[z_row, i] = z_stab
+        end
+        
+        # RHS from L
+        x_L, z_L = L[j]
+        M[x_row, r + 1] = x_L
+        M[z_row, r + 1] = z_L
+    end
+    
+    # Gaussian elimination over GF(2)
+    pivot_row = 1
+    pivot_cols = Int[]
+    
+    for col in 1:r
+        # Find pivot
+        found_pivot = false
+        for row in pivot_row:num_constraints
+            if M[row, col]
+                # Swap rows
+                if row != pivot_row
+                    M[pivot_row, :], M[row, :] = M[row, :], M[pivot_row, :]
+                end
+                found_pivot = true
+                break
+            end
+        end
+        
+        if !found_pivot
+            continue
+        end
+        
+        push!(pivot_cols, col)
+        
+        # Eliminate
+        for row in 1:num_constraints
+            if row != pivot_row && M[row, col]
+                M[row, :] .⊻= M[pivot_row, :]
+            end
+        end
+        
+        pivot_row += 1
+        if pivot_row > num_constraints
+            break
+        end
+    end
+    
+    # Check for inconsistency: any row with all zeros in stabilizer columns but 1 in RHS
+    for row in 1:num_constraints
+        if !any(M[row, 1:r]) && M[row, r + 1]
+            # No solution exists
+            return nothing
+        end
+    end
+    
+    # Back-substitute to find which stabilizers to multiply
+    solution = zeros(Bool, r)
+    for (idx, col) in enumerate(pivot_cols)
+        solution[col] = M[idx, r + 1]
+    end
+    
+    # Construct the representative
+    result = copy(L)
+    for i in 1:r
+        if solution[i]
+            result = result * S[i]
+        end
+    end
+    
+    return result
+end
+
+"""
     subregion_logical_paulis(stab::MixedDestabilizer, A::Vector{Int}) -> Vector{PauliOperator}
 
-Get all logical Pauli operators that are fully supported on subsystem A.
+Get all logical Pauli operators that have a representative supported only on subsystem A.
 
-This function filters the complete set of 4^k logical operators to return only those
-whose support is contained within the specified subsystem A. These operators form
-the subalgebra M_A ⊂ M of logical operators accessible from region A.
+This function finds, for each of the 4^k logical operator equivalence classes, 
+whether there exists a representative (logical operator times stabilizers) that 
+is fully supported on the subsystem A. These operators form the subalgebra M_A ⊂ M.
+
+# Algorithm
+For each bare logical operator L:
+1. Find if there exists stabilizers S₁, S₂, ... such that L * S₁ * S₂ * ... is supported on A
+2. This is done via Gaussian elimination over GF(2)
 
 # Arguments
 - `stab::MixedDestabilizer`: The stabilizer code
 - `A::Vector{Int}`: Qubit indices defining subsystem A
 
 # Returns
-- `Vector{PauliOperator}`: Logical operators supported on A (forming M_A)
+- `Vector{PauliOperator}`: Representatives of logical operator classes supported on A
 
 # Example
 ```julia
-julia> s = S"XXXX+ZIZI+IZIZ"
+julia> s = S"XXXX
+             ZIZI
+             IZIZ"  # [[4,1,2]] code
 julia> stab = MixedDestabilizer(s)
 julia> sub_ops = subregion_logical_paulis(stab, [1, 2])
+julia> P"ZZ__" in sub_ops  # Should find ZZ on qubits 1,2
+true
 ```
 """
 function subregion_logical_paulis(stab::MixedDestabilizer, A::Vector{Int})
-    all_ops = all_logical_paulis(stab)
-    return filter(P -> is_supported_on(P, A), all_ops)
+    bare_logicals = all_logical_paulis(stab)
+    
+    result = PauliOperator[]
+    for L in bare_logicals
+        rep = find_minimal_support_representative(L, stab, A)
+        if rep !== nothing
+            push!(result, rep)
+        end
+    end
+    
+    return result
 end
 
 #=============================================================================
@@ -226,41 +386,193 @@ function stabilizer_state_vector(S::Stabilizer)
 end
 
 """
+    is_in_stabilizer_group(P::PauliOperator, stab::MixedDestabilizer) -> Tuple{Bool, ComplexF64}
+
+Check if Pauli operator P is in the stabilizer group, and if so, return its phase.
+
+Uses the rowdecompose-like approach: if P can be written as a product of stabilizers,
+it's in the group.
+
+# Returns
+- `(true, phase)` if P is in the stabilizer group with the given phase factor
+- `(false, 0)` if P is not in the stabilizer group
+"""
+function is_in_stabilizer_group(P::PauliOperator, stab::MixedDestabilizer)
+    n = nqubits(P)
+    S = stabilizerview(stab)
+    r = length(S)
+    
+    # Try to express P as a product of stabilizer generators
+    # This is equivalent to solving a linear system over GF(2)
+    
+    # Build the matrix of stabilizer generators (in GF(2))
+    # Each stabilizer contributes a column, each qubit contributes 2 rows (X and Z bits)
+    M = zeros(Bool, 2n, r + 1)  # Last column is for P
+    
+    for j in 1:r
+        for i in 1:n
+            x, z = S[j][i]
+            M[i, j] = x
+            M[n + i, j] = z
+        end
+    end
+    
+    # RHS: P
+    for i in 1:n
+        x, z = P[i]
+        M[i, r + 1] = x
+        M[n + i, r + 1] = z
+    end
+    
+    # Gaussian elimination
+    pivot_row = 1
+    pivot_cols = Int[]
+    
+    for col in 1:r
+        found_pivot = false
+        for row in pivot_row:2n
+            if M[row, col]
+                if row != pivot_row
+                    M[pivot_row, :], M[row, :] = M[row, :], M[pivot_row, :]
+                end
+                found_pivot = true
+                break
+            end
+        end
+        
+        if !found_pivot
+            continue
+        end
+        
+        push!(pivot_cols, col)
+        
+        for row in 1:2n
+            if row != pivot_row && M[row, col]
+                M[row, :] .⊻= M[pivot_row, :]
+            end
+        end
+        
+        pivot_row += 1
+        if pivot_row > 2n
+            break
+        end
+    end
+    
+    # Check for inconsistency
+    for row in 1:2n
+        if !any(M[row, 1:r]) && M[row, r + 1]
+            return (false, zero(ComplexF64))
+        end
+    end
+    
+    # P is in the group. Compute the phase.
+    solution = zeros(Bool, r)
+    for (idx, col) in enumerate(pivot_cols)
+        if idx <= length(pivot_cols)
+            solution[col] = M[idx, r + 1]
+        end
+    end
+    
+    # Reconstruct the product and compute phase
+    accumulated_phase = 0x0
+    result = zero(PauliOperator, n)
+    for i in 1:r
+        if solution[i]
+            # Multiply result by S[i], tracking phase
+            result = result * S[i]
+        end
+    end
+    
+    # The phase of the product should match P's phase for P to be in the group
+    # Actually, we need to check if result equals P (including phase)
+    # result and P should have the same X,Z bits (guaranteed by the linear algebra)
+    # The phase of result is accumulated_phase, phase of P is P.phase[]
+    
+    # The eigenvalue is i^(P.phase[] - result.phase[]) = i^diff
+    diff = (P.phase[] - result.phase[]) & 0x3
+    phase_factor = im^diff
+    
+    return (true, phase_factor)
+end
+
+"""
     expect_pauli(P::PauliOperator, S::Stabilizer) -> ComplexF64
 
 Compute the expectation value ⟨ψ|P|ψ⟩ for a Pauli operator P on stabilizer state |ψ⟩.
 
-For a Pauli operator P on a stabilizer state |ψ⟩:
-- If P ∈ S (stabilizer group): ⟨ψ|P|ψ⟩ = ±1 (determined by phase)
-- If P anticommutes with any stabilizer: ⟨ψ|P|ψ⟩ = 0
-- Otherwise: more complex calculation needed
+**Efficient Implementation using Stabilizer Formalism:**
+
+For a Pauli operator P on a stabilizer state |ψ⟩ defined by stabilizer group S:
+
+1. If P anticommutes with any stabilizer generator: ⟨ψ|P|ψ⟩ = 0
+2. If P is in the stabilizer group S: ⟨ψ|P|ψ⟩ = ±1 or ±i (determined by the phase)
+3. If P commutes with S but is not in S: ⟨ψ|P|ψ⟩ = 0 (P is a non-trivial logical operator)
+
+This implementation has complexity O(n³) where n is the number of qubits,
+avoiding the exponential cost of state vector computation.
 
 # Arguments
 - `P::PauliOperator`: The Pauli operator
-- `S::Stabilizer`: The stabilizer state
+- `S::Stabilizer`: The stabilizer state (must be full rank for pure state)
 
 # Returns
 - `ComplexF64`: The expectation value
 """
 function expect_pauli(P::PauliOperator, S::Stabilizer)
-    # Check if P commutes with all stabilizers
-    for i in 1:length(S)
-        Si = S[i]
-        # comm(P, Si) returns 0 if they commute, 1 if they anticommute
-        if comm(P, Si) != 0
-            return zero(ComplexF64)  # Anticommutes => expectation is 0
+    n = nqubits(S)
+    r = length(S)
+    
+    # Step 1: Check if P anticommutes with any stabilizer
+    for i in 1:r
+        if comm(P, S[i]) != 0
+            return zero(ComplexF64)
         end
     end
     
-    # P commutes with all stabilizers
-    # For small systems, use matrix representation
-    n = nqubits(S)
-    if n <= 12
-        ψ = stabilizer_state_vector(S)
-        P_mat = pauli_to_matrix(P)
-        return dot(ψ, P_mat * ψ)
+    # Step 2: P commutes with all stabilizers.
+    # Check if P is in the stabilizer group.
+    
+    # For a full-rank stabilizer (pure state), if P commutes with all generators
+    # and is not the identity, we need to check if it's in the group.
+    
+    # Use MixedDestabilizer for the decomposition
+    stab = MixedDestabilizer(S)
+    
+    in_group, phase = is_in_stabilizer_group(P, stab)
+    
+    if in_group
+        return phase
     else
-        error("Large system expectation not yet implemented efficiently")
+        # P commutes with S but is not in S
+        # This means P is a logical operator (for codes) or something else
+        # For a pure stabilizer state, expectation is 0
+        return zero(ComplexF64)
+    end
+end
+
+"""
+    expect_pauli(P::PauliOperator, stab::MixedDestabilizer) -> ComplexF64
+
+Compute ⟨ψ|P|ψ⟩ for a Pauli operator on a state represented by MixedDestabilizer.
+"""
+function expect_pauli(P::PauliOperator, stab::MixedDestabilizer)
+    S = stabilizerview(stab)
+    r = length(S)
+    
+    # Check anticommutation
+    for i in 1:r
+        if comm(P, S[i]) != 0
+            return zero(ComplexF64)
+        end
+    end
+    
+    # Check if in stabilizer group
+    in_group, phase = is_in_stabilizer_group(P, stab)
+    
+    if in_group
+        return phase
+    else
+        return zero(ComplexF64)
     end
 end
 
