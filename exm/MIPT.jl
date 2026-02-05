@@ -215,7 +215,9 @@ function run_parameter_scan(Llist, p_list, nshot::Int; show_progress=true)
     
     # Each task runs multithreaded shots internally
     for (ip, iL, p, L) in tasks
-        Ss, Ss_scaling = run_mipt_clifford(L, obtain_depth(L), Float64(p), nshot)
+        Ss, S_scaling = run_mipt_clifford(L, obtain_depth(L), Float64(p), nshot)
+        save(joinpath("exm/data/MIPT/L$(L)", "L$(L)_p$(round(p, digits=3))_scaling.jld2"), 
+        "S_scaling", mean(hcat(S_scaling...), dims=2))
         S_mean[ip, iL] = mean(Ss)
         S_err[ip, iL]  = std(Ss) / sqrt(nshot)
         show_progress && next!(prog)
@@ -227,8 +229,8 @@ end
 
 # ================== Parameters ==================
 
-Llist  = 2 .^collect(2:9)             # Chain length
-nshot  = 10000            # Number of random circuit samples per p point
+Llist  = 2 .^collect(2:8)             # Chain length
+nshot  = 5000            # Number of random circuit samples per p point
 p_list = 0.0:0.02:0.3   # Measurement probability scan
 # ================================================
 
@@ -240,6 +242,6 @@ println("Start scanning, samples=$nshot")
 S_mean, S_err = run_parameter_scan(Llist, p_list, nshot)
 savepath = "exm/data/MIPT/"
 mkpath(savepath)
-save(joinpath(savepath, "data.jld2"), 
+save(joinpath(savepath, "MIPT_L$(Llist[end]).jld2"), 
 "S_mean", S_mean, 
 "S_err", S_err) 
