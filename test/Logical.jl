@@ -29,7 +29,7 @@ end
     @test is_supported_on(P"____", [1])  # Identity supported everywhere
 end
 
-@testset "subregion_logical_paulis - Issue #3 test case" begin
+@testset "subregion_logical_paulis" begin
     # This is the exact test case from Issue #3
     s = S"XXXX
           ZIZI
