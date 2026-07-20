@@ -604,78 +604,195 @@ function stabilizer_inner_product_with_pauli(ψ1::Stabilizer, P::PauliOperator, 
 end
 
 """
-    paulis_equivalent(P1::PauliOperator, P2::PauliOperator) -> Bool
+    pauli_bits(P::PauliOperator) -> BitVector
 
-Check if two Pauli operators have the same X and Z bits (ignoring phase).
+Return the binary symplectic vector (x | z) of length 2n for a Pauli operator.
 """
-function paulis_equivalent(P1::PauliOperator, P2::PauliOperator)
-    n = nqubits(P1)
-    nqubits(P2) == n || return false
+function pauli_bits(P::PauliOperator)
+    n = nqubits(P)
+    v = falses(2n)
     for i in 1:n
-        P1[i] == P2[i] || return false
+        x, z = P[i]
+        v[i] = x
+        v[n + i] = z
     end
-    return true
+    return v
 end
 
 """
-    logical_pauli_to_matrix(P::PauliOperator, basis::Vector{PauliOperator}, dim::Int) -> Matrix{ComplexF64}
+    logical_algebra_map(sub_logical::Vector{PauliOperator}) -> (images, phase_corrections, dim)
 
-Convert a physical Pauli operator (representing a logical operator) to its 
-logical qubit matrix representation.
+Given the logical Pauli operators M_A supported on a subregion (a group of size
+d = 2^m), construct their abstract representation.
+
+The algebra M_A is brought to canonical form by symplectic Gram-Schmidt over
+GF(2): k' anticommuting pairs (P_i, Q_i) and a center {R_j}. The abstract
+Hilbert space has dimension D = 2^(k' + n_z), with images P_i ↦ X_i, Q_i ↦ Z_i
+on pair qubits and R_j ↦ Z on the n_z "classical" center qubits.
+
+# Returns
+- `images::Vector{PauliOperator}`: abstract image for each element of `sub_logical`
+- `phase_corrections::Vector{UInt8}`: ε per element such that the true image is
+  i^ε · images[i] (phases must match the concrete operator for tomography)
+- `dim::Int`: the abstract Hilbert space dimension D
 """
-function logical_pauli_to_matrix(P::PauliOperator, basis::Vector{PauliOperator}, dim::Int)
-    n_logical = round(Int, log2(dim))
-    
-    # Single qubit Pauli matrices
-    I2 = ComplexF64[1 0; 0 1]
-    X = ComplexF64[0 1; 1 0]  
-    Y = ComplexF64[0 -im; im 0]
-    Z = ComplexF64[1 0; 0 -1]
-    
-    # Find which basis element P corresponds to
-    idx = findfirst(B -> paulis_equivalent(P, B), basis)
-    if isnothing(idx)
-        return zeros(ComplexF64, dim, dim)
-    end
-    
-    idx -= 1  # Convert to 0-based
-    
-    # Build tensor product based on idx encoding
-    mat = ComplexF64[1.0+0im;;]
-    for i in 1:n_logical
-        digit = (idx >> (2*(i-1))) & 3
-        local_mat = if digit == 0
-            I2
-        elseif digit == 1
-            X
-        elseif digit == 2
-            Y
-        else
-            Z
+function logical_algebra_map(sub_logical::Vector{PauliOperator})
+    d = length(sub_logical)
+    n = nqubits(first(sub_logical))
+    m = round(Int, log2(d))
+    @assert 2^m == d "M_A size must be a power of 2"
+
+    # ---- GF(2) generator extraction --------------------------------------
+    # Row-echelon basis of {bits(P)}, tracking combinations of input elements
+    pivots = Int[]
+    brows = BitVector[]    # basis bit vectors
+    bcombo = BitVector[]   # basis row as combination of input element indices
+    for e in 1:d
+        v = pauli_bits(sub_logical[e])
+        c = falses(d); c[e] = true
+        for k in eachindex(pivots)
+            if v[pivots[k]]
+                v .⊻= brows[k]; c .⊻= bcombo[k]
+            end
         end
-        mat = kron(mat, local_mat)
+        nz = findfirst(v)
+        if nz !== nothing
+            push!(pivots, nz); push!(brows, v); push!(bcombo, c)
+        end
     end
-    
-    # Apply phase from P
-    phase_factor = im^(P.phase[])
-    return phase_factor * mat
+    @assert length(pivots) == m
+
+    # Concrete generators: products of the input elements selected by bcombo.
+    # Multiplying the actual (Hermitian) input elements keeps phases consistent.
+    gens = PauliOperator[]
+    for k in 1:m
+        G = zero(PauliOperator, n)
+        for e in 1:d
+            if bcombo[k][e]
+                G = G * sub_logical[e]
+            end
+        end
+        push!(gens, G)
+    end
+
+    # ---- Symplectic Gram-Schmidt ------------------------------------------
+    pairs = Tuple{Int, Int}[]
+    center = Int[]
+    remaining = collect(1:m)
+    while !isempty(remaining)
+        a = popfirst!(remaining)
+        j = findfirst(i -> comm(gens[a], gens[i]) != 0, remaining)
+        if j === nothing
+            push!(center, a)
+        else
+            b = remaining[j]
+            deleteat!(remaining, j)
+            push!(pairs, (a, b))
+            for c in remaining
+                ca = comm(gens[c], gens[a]) != 0
+                cb = comm(gens[c], gens[b]) != 0
+                ca && (gens[c] = gens[c] * gens[b])
+                cb && (gens[c] = gens[c] * gens[a])
+            end
+        end
+    end
+
+    # Make generators Hermitian (fix odd phases by multiplying with i)
+    herm_gens = PauliOperator[]
+    for G in gens
+        if isodd(G.phase[])
+            Gh = copy(G)
+            Gh.phase[] = (Gh.phase[] + 0x1) & 0x3
+            push!(herm_gens, Gh)
+        else
+            push!(herm_gens, G)
+        end
+    end
+
+    # ---- Abstract images of the generators --------------------------------
+    npairs = length(pairs)
+    nz = length(center)
+    n_abs = npairs + nz
+    D = 2^n_abs
+
+    function single_pauli(nq, qubit, is_x)
+        x = falses(nq)
+        z = falses(nq)
+        (is_x ? x : z)[qubit] = true
+        return PauliOperator(0x0, x, z)
+    end
+
+    gabs = Vector{PauliOperator}(undef, m)
+    for (idx, (a, b)) in enumerate(pairs)
+        gabs[a] = single_pauli(n_abs, idx, true)   # X on pair qubit
+        gabs[b] = single_pauli(n_abs, idx, false)  # Z on pair qubit
+    end
+    for (idx, a) in enumerate(center)
+        gabs[a] = single_pauli(n_abs, npairs + idx, false)  # Z on center qubit
+    end
+
+    # ---- Express every element over the final generators ------------------
+    gen_vecs = pauli_bits.(herm_gens)
+    # Row-echelon form of the final generator set
+    piv2 = Int[]
+    rrows = BitVector[]
+    rcombo = BitVector[]
+    for i in 1:m
+        v = copy(gen_vecs[i])
+        c = falses(m); c[i] = true
+        for k in eachindex(piv2)
+            if v[piv2[k]]
+                v .⊻= rrows[k]; c .⊻= rcombo[k]
+            end
+        end
+        nz2 = findfirst(v)
+        @assert nz2 !== nothing
+        push!(piv2, nz2); push!(rrows, v); push!(rcombo, c)
+    end
+
+    images = Vector{PauliOperator}(undef, d)
+    eps = Vector{UInt8}(undef, d)
+    for e in 1:d
+        v = pauli_bits(sub_logical[e])
+        c = falses(m)
+        for k in eachindex(piv2)
+            if v[piv2[k]]
+                v .⊻= rrows[k]; c .⊻= rcombo[k]
+            end
+        end
+        # Concrete product of Hermitian generators (tracks phase)
+        Π = zero(PauliOperator, n)
+        A = zero(PauliOperator, n_abs)
+        for i in 1:m
+            if c[i]
+                Π = Π * herm_gens[i]
+                A = A * gabs[i]
+            end
+        end
+        images[e] = A
+        # True image: sub_logical[e] = i^ε · Π  =>  image = i^ε · A
+        eps[e] = (sub_logical[e].phase[] - Π.phase[]) & 0x3
+    end
+
+    return images, eps, D
 end
 
 """
-    compute_logical_density_matrix(S::Stabilizer, A::Vector{Int}, 
-                                   states::Vector{<:Stabilizer}, 
+    compute_logical_density_matrix(S::Stabilizer, A::Vector{Int},
+                                   states::Vector{<:Stabilizer},
                                    coeffs::Vector{<:Number}) -> Matrix{ComplexF64}
 
-Compute the logical density matrix ρ_A for subsystem A.
+Compute the logical (bulk) density matrix ρ_a for subsystem A.
 
-Given a state |Ψ⟩ = Σ_j c_j |ψ_j⟩ where |ψ_j⟩ are stabilizer states in the code space
-defined by S, compute the reduced density matrix on the logical subspace accessible
-from region A.
+Given a state |Ψ⟩ = Σ_j c_j |ψ_j⟩ where |ψ_j⟩ are stabilizer states in the code
+space defined by S, compute the algebraic state on the logical subalgebra M_A
+recoverable from region A. The subalgebra is decomposed into anticommuting
+pairs (factor part) plus a center (classical part), following the operator
+algebra quantum error correction structure of arXiv:2510.06318 (Appendix A).
 
 The density matrix is computed via Pauli tomography:
-    ρ_A = (1/d) Σ_P ⟨Ψ|P|Ψ⟩ P
-
-where P ranges over all logical Paulis supported on A, and d = dim(M_A).
+    ρ_a = (1/D) Σ_P ⟨Ψ|P|Ψ⟩ P_abs
+where P ranges over M_A and D is the abstract Hilbert space dimension.
 
 # Arguments
 - `S::Stabilizer`: The common stabilizer group
@@ -684,30 +801,29 @@ where P ranges over all logical Paulis supported on A, and d = dim(M_A).
 - `coeffs::Vector{Number}`: The coefficients c_j
 
 # Returns
-- `Matrix{ComplexF64}`: The logical density matrix ρ_A
+- `Matrix{ComplexF64}`: The logical density matrix ρ_a
 """
-function compute_logical_density_matrix(S::Stabilizer, A::Vector{Int}, 
-                                        states::Vector{<:Stabilizer}, 
+function compute_logical_density_matrix(S::Stabilizer, A::Vector{Int},
+                                        states::Vector{<:Stabilizer},
                                         coeffs::Vector{<:Number})
     n = nqubits(S)
     K = length(states)
     @assert K == length(coeffs) "Number of states must match number of coefficients"
     @assert all(1 .≤ A .≤ n) "Subsystem A indices out of bounds"
-    
+
     # Get logical operators supported on A
     stab_md = MixedDestabilizer(S)
     sub_logical = subregion_logical_paulis(stab_md, A)
     d = length(sub_logical)
-    
+
     if d == 0
         error("No logical operators supported on subsystem A")
     end
-    
-    # Dimension: d = 4^{k_A}, so dim = 2^{k_A}
-    k_a = round(Int, log2(d) / 2)
-    dim = 2^k_a
-    
-    # Compute expectation values ⟨Ψ|P|Ψ⟩ for each logical Pauli P
+
+    # Abstract representation of M_A (handles factor and non-factor cases)
+    images, eps, dim = logical_algebra_map(sub_logical)
+
+    # Expectation values ⟨Ψ|P|Ψ⟩ for each logical Pauli P
     expvals = ComplexF64[]
     for P in sub_logical
         ev = zero(ComplexF64)
@@ -717,20 +833,19 @@ function compute_logical_density_matrix(S::Stabilizer, A::Vector{Int},
         end
         push!(expvals, ev)
     end
-    
-    # Reconstruct density matrix
+
+    # Reconstruct density matrix: ρ_a = (1/D) Σ_P ⟨Ψ|P|Ψ⟩ · i^ε · P_abs
     ρ_a = zeros(ComplexF64, dim, dim)
-    for (i, P) in enumerate(sub_logical)
-        P_logical_mat = logical_pauli_to_matrix(P, sub_logical, dim)
-        ρ_a .+= (expvals[i] / d) .* P_logical_mat
+    for i in 1:d
+        ρ_a .+= (expvals[i] * im^eps[i] / dim) .* pauli_to_matrix(images[i])
     end
-    
+
     # Ensure Hermitian and normalized
     ρ_a = (ρ_a + ρ_a') / 2
     if abs(tr(ρ_a)) > 1e-10
         ρ_a ./= tr(ρ_a)
     end
-    
+
     return ρ_a
 end
 

@@ -1,6 +1,7 @@
 module MagicEntanglement
 
 include("Logical.jl")
+include("Entanglement.jl")
 
 export all_logical_paulis, 
        compute_logical_entropy,
@@ -12,5 +13,11 @@ export all_logical_paulis,
        expect_pauli,
        compute_logical_density_matrix,
        find_minimal_support_representative,
-       is_in_stabilizer_group
+       is_in_stabilizer_group,
+       gf2_rank,
+       stabilizer_entropy,
+       reference_stabilizer_state,
+       compute_entanglement,
+       compute_renyi_entropy,
+       entanglement_spectrum
 end
