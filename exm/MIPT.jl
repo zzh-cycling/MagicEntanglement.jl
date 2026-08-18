@@ -51,11 +51,23 @@ end
     
             stab = one(Stabilizer, L)
             S_trajectory[1] = half_chain_entropy(stab, L)
+
+            # Random global offset of the brick wall, drawn once per trajectory.
+            # A fixed brick wall is invariant only under two-site translations, so
+            # its steady state dimerizes and S(l) shows an even-odd staggering in
+            # the cut position. Shifting the whole matching by a random 0/1 sites
+            # per shot restores one-site translation invariance of the trajectory
+            # ensemble and cancels the staggering, while leaving the steady-state
+            # ensemble (and hence S(L/2) and p_c) unchanged.
+            offset = rand(rng, 0:1)
+            nbonds = pbc ? L : L - 1   # ring bonds (i, i+1 mod L), or open chain
             
             for t in 1:depth
-                # Odd bonds
-                for i in 1:2:L-1
-                    apply!(stab, random_two_clifford(i, i+1, rng))
+                # Gate layer: bonds (i, i+1 mod L) with (i + offset) odd
+                for i in 1:nbonds
+                    if (i + offset) % 2 == 1
+                        apply!(stab, random_two_clifford(i, mod(i, L) + 1, rng))
+                    end
                 end
 
                 for i in 1:L
@@ -64,14 +76,14 @@ end
                     end
                 end
         
-                # Even bonds
-                for i in 2:2:L-1
-                    apply!(stab, random_two_clifford(i, i+1, rng))
+                # Gate layer: bonds (i, i+1 mod L) with (i + offset) even
+                for i in 1:nbonds
+                    if (i + offset) % 2 == 0
+                        apply!(stab, random_two_clifford(i, mod(i, L) + 1, rng))
+                    end
                 end
 
-                if pbc # Assue L is even
-                    apply!(stab, random_two_clifford(L, 1, rng))
-                end
+                # (the wrap bond (L, 1) is included via nbonds when pbc)
                 
                 for i in 1:L
                     if rand(rng) < p
@@ -98,11 +110,17 @@ end
         try 
             rng = MersenneTwister(seed)
             stab = one(Stabilizer, L)
+
+            # Per-shot brick-wall offset, see single_shot_dynamics above.
+            offset = rand(rng, 0:1)
+            nbonds = pbc ? L : L - 1
             
             for t in 1:depth
-                # Odd bonds
-                for i in 1:2:L-1
-                    apply!(stab, random_two_clifford(i, i+1, rng))
+                # Gate layer: bonds (i, i+1 mod L) with (i + offset) odd
+                for i in 1:nbonds
+                    if (i + offset) % 2 == 1
+                        apply!(stab, random_two_clifford(i, mod(i, L) + 1, rng))
+                    end
                 end
         
                 for i in 1:L
@@ -111,14 +129,14 @@ end
                     end
                 end
         
-                # Even bonds
-                for i in 2:2:L-1
-                    apply!(stab, random_two_clifford(i, i+1, rng))
+                # Gate layer: bonds (i, i+1 mod L) with (i + offset) even
+                for i in 1:nbonds
+                    if (i + offset) % 2 == 0
+                        apply!(stab, random_two_clifford(i, mod(i, L) + 1, rng))
+                    end
                 end
                 
-                if pbc # Assue L is even
-                    apply!(stab, random_two_clifford(L, 1, rng))
-                end
+                # (the wrap bond (L, 1) is included via nbonds when pbc)
 
                 for i in 1:L
                     if rand(rng) < p
